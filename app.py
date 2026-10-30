@@ -258,15 +258,19 @@ def _build_results_df(results: list[dict]) -> pd.DataFrame:
         cc_handle = (r.get("cc_handles") or [None])[0] or r.get("codechef")
         lc_handle = (r.get("lc_handles") or [None])[0] or r.get("leetcode")
 
-        cf_url = _platform_profile_url("codeforces", cf_handle)
-        cc_url = _platform_profile_url("codechef", cc_handle)
-        lc_url = _platform_profile_url("leetcode", lc_handle)
+        icpc_list = r.get("icpc_achievements", [])
+        icpc_display = ", ".join(i["text"] for i in icpc_list) if icpc_list else "NA"
+
+        port_list = r.get("portfolio_links", [])
+        port_display = port_list[0] if port_list else "NA"
 
         rows.append(
             {
                 "#": idx,
                 "Name": r["name"],
                 "Resume Link": r.get("url", ""),
+                "ICPC / Achievements": icpc_display,
+                "Portfolio": port_display,
                 "Codeforces": (
                     f"{_val(r['cf_stats']['max_rating'])} in {_val(r['cf_stats']['contests_to_max'])} contests"
                 ),
@@ -284,14 +288,21 @@ def _build_results_df(results: list[dict]) -> pd.DataFrame:
 
 def _to_excel(results: list[dict]) -> bytes:
     """
-    Build Excel with 3 columns: Name | Resume link | context.
-    Each candidate occupies 3 sub-rows (one per platform).
-    Name and Resume link cells are merged vertically across those 3 rows.
-    Each context cell is its own row with a real clickable hyperlink.
-    If no handle found → shows 'platform : NA' (plain, no link).
+    Build Excel matching the exact format shown in the reference image:
+    Columns: Name | Resume link | context
+    - Name and Resume link are vertically merged across all sub-rows for each candidate.
+    - Column 3 (context) has separate sub-rows with horizontal grid lines:
+        1. ICPC achievement (if present, e.g. 'ICPC regionalist in 2023')
+        2. Portfolio link (if present, 'check portfolio' with url below)
+        3. Codeforces: Line 1 = 'Codeforces : {rating} in {contests} contest', Line 2 = profile URL (blue, underlined)
+        4. CodeChef: Line 1 = 'CodeChef : {rating} in {contests} contest', Line 2 = profile URL (blue, underlined)
+        5. LeetCode: Line 1 = 'LeetCode : {rating} in {contests} contest', Line 2 = profile URL (blue, underlined)
+    - If a platform is not present, shows 'Codeforces : NA' without a second URL line.
     """
     import openpyxl
     from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
+    from openpyxl.cell.rich_text import CellRichText, TextBlock
+    from openpyxl.cell.text import InlineFont
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -299,20 +310,20 @@ def _to_excel(results: list[dict]) -> bytes:
 
     # ── Styles ──────────────────────────────────────────────
     header_fill = PatternFill("solid", fgColor="D9D9D9")
-    thin   = Side(style="thin",   color="BFBFBF")
-    medium = Side(style="medium", color="9E9E9E")
-    # outer border for merged name/link cells (bottom edge drawn at last sub-row)
-    inner_border  = Border(left=thin, right=thin, top=thin,   bottom=thin)
-    top_border    = Border(left=thin, right=thin, top=medium, bottom=thin)
-    bottom_border = Border(left=thin, right=thin, top=thin,   bottom=medium)
-    only_border   = Border(left=thin, right=thin, top=medium, bottom=medium)
+    thin   = Side(style="thin",   color="D3D3D3")
+    medium = Side(style="medium", color="7F7F7F")
 
-    link_font   = Font(color="0563C1", underline="single")
-    normal_font = Font(color="000000")
-    bold_font   = Font(bold=True)
-    center_wrap = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    mid_wrap    = Alignment(vertical="center", wrap_text=True)
-    mid_left    = Alignment(vertical="center", horizontal="left", wrap_text=True)
+    link_font   = Font(color="0563C1", underline="single", name="Calibri", size=11)
+    normal_font = Font(color="000000", name="Calibri", size=11)
+    bold_font   = Font(bold=True, name="Calibri", size=11)
+
+    inline_black = InlineFont(rFont="Calibri", sz=11, color="000000")
+    inline_blue  = InlineFont(rFont="Calibri", sz=11, color="0563C1", u="single")
+
+    center_bottom = Alignment(horizontal="center", vertical="bottom", wrap_text=True)
+    left_bottom   = Alignment(horizontal="left",   vertical="bottom", wrap_text=True)
+    mid_left      = Alignment(horizontal="left",   vertical="center", wrap_text=True)
+    center_wrap   = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     PLATFORM_ORDER = [
         ("codeforces", "Codeforces"),
@@ -326,8 +337,9 @@ def _to_excel(results: list[dict]) -> bytes:
         cell = ws.cell(row=1, column=col_idx, value=h)
         cell.font = bold_font
         cell.fill = header_fill
-        cell.border = inner_border
+        cell.border = Border(left=thin, right=thin, top=medium, bottom=medium)
         cell.alignment = center_wrap
+    ws.row_dimensions[1].height = 24
 
     # ── Data rows ───────────────────────────────────────────
     current_row = 2
@@ -347,74 +359,113 @@ def _to_excel(results: list[dict]) -> bytes:
             "leetcode":   r["lc_stats"],
         }
 
-        start_row = current_row
-        end_row   = current_row + 2   # 3 sub-rows per candidate
+        # Build sub-row items for Column C
+        sub_items = []
 
-        # ── Col A: Name (merged) ─────────────────────────────
-        ws.merge_cells(
-            start_row=start_row, start_column=1,
-            end_row=end_row,     end_column=1,
-        )
-        name_cell = ws.cell(row=start_row, column=1, value=r["name"])
-        name_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        name_cell.border = Border(left=medium, right=thin, top=medium, bottom=medium)
+        # 1. ICPC achievements
+        for icpc in r.get("icpc_achievements", []):
+            sub_items.append({
+                "text": icpc["text"],
+                "url": icpc.get("url"),
+            })
 
-        # ── Col B: Resume link (merged) ──────────────────────
-        ws.merge_cells(
-            start_row=start_row, start_column=2,
-            end_row=end_row,     end_column=2,
-        )
-        resume_url = r.get("url", "")
-        link_cell = ws.cell(row=start_row, column=2, value=resume_url)
-        if resume_url:
-            link_cell.hyperlink = resume_url
-            link_cell.font = link_font
-        link_cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-        link_cell.border = Border(left=thin, right=thin, top=medium, bottom=medium)
+        # 2. Portfolio links
+        for port_url in r.get("portfolio_links", []):
+            sub_items.append({
+                "text": "check portfolio",
+                "url": port_url,
+            })
 
-        # ── Col C: context — one sub-row per platform ────────
-        for sub, (key, label) in enumerate(PLATFORM_ORDER):
-            row = current_row + sub
-            handle  = handles[key]
-            stats   = stats_map[key]
+        # 3. Competitive programming platforms
+        for key, label in PLATFORM_ORDER:
+            handle = handles[key]
+            stats = stats_map[key]
             prof_url = _platform_profile_url(key, handle)
 
-            has_data = (stats["max_rating"] is not None or stats["contests_to_max"] is not None)
-            r_val = _val(stats["max_rating"])
-            c_val = _val(stats["contests_to_max"])
-            text = (
-                f"{label} : {r_val} in {c_val} contest"
-                if has_data else
-                f"{label} : NA"
-            )
-
-            ctx_cell = ws.cell(row=row, column=3, value=text)
-            if prof_url and has_data:
-                ctx_cell.hyperlink = prof_url
-                ctx_cell.font = link_font
+            r_val = stats["max_rating"]
+            c_val = stats["contests_to_max"]
+            if r_val is not None:
+                c_str = f"{c_val} contest" if c_val is not None else "NA contest"
+                text = f"{label} : {r_val} in {c_str}"
+                sub_items.append({
+                    "text": text,
+                    "url": prof_url,
+                })
             else:
-                ctx_cell.font = normal_font
+                sub_items.append({
+                    "text": f"{label} : NA",
+                    "url": None,
+                })
 
-            # border: thicker top on first row, thicker bottom on last
-            if sub == 0:
-                ctx_cell.border = Border(left=thin, right=medium, top=medium, bottom=thin)
-            elif sub == 2:
-                ctx_cell.border = Border(left=thin, right=medium, top=thin, bottom=medium)
+        n_sub = len(sub_items)
+        start_row = current_row
+        end_row = current_row + n_sub - 1
+
+        # ── Col A: Name (merged vertically) ──────────────────
+        ws.merge_cells(start_row=start_row, start_column=1, end_row=end_row, end_column=1)
+
+        # ── Col B: Resume link (merged vertically) ───────────
+        ws.merge_cells(start_row=start_row, start_column=2, end_row=end_row, end_column=2)
+
+        # ── Write and style all sub-rows ─────────────────────
+        for sub_idx, item in enumerate(sub_items):
+            row_num = start_row + sub_idx
+            is_top = (sub_idx == 0)
+            is_bottom = (sub_idx == n_sub - 1)
+            t_side = medium if is_top else thin
+            b_side = medium if is_bottom else thin
+
+            # Col A: Name
+            cell_a = ws.cell(row=row_num, column=1)
+            cell_a.border = Border(left=medium, right=thin, top=t_side, bottom=b_side)
+            if is_top:
+                cell_a.value = r["name"]
+                cell_a.font = normal_font
+                cell_a.alignment = center_bottom
+
+            # Col B: Resume link
+            cell_b = ws.cell(row=row_num, column=2)
+            cell_b.border = Border(left=thin, right=thin, top=t_side, bottom=b_side)
+            if is_top:
+                resume_url = r.get("url", "")
+                cell_b.value = resume_url
+                if resume_url:
+                    cell_b.hyperlink = resume_url
+                    cell_b.font = link_font
+                else:
+                    cell_b.font = normal_font
+                cell_b.alignment = left_bottom
+
+            # Col C: Sub-row item
+            cell_c = ws.cell(row=row_num, column=3)
+            cell_c.border = Border(left=thin, right=medium, top=t_side, bottom=b_side)
+            cell_c.alignment = mid_left
+
+            if item.get("url"):
+                # 2 lines: Line 1 text (black) + Line 2 URL (blue, underlined)
+                rt = CellRichText(
+                    TextBlock(inline_black, item["text"] + "\n"),
+                    TextBlock(inline_blue, item["url"])
+                )
+                cell_c.value = rt
+                cell_c.hyperlink = item["url"]
+                ws.row_dimensions[row_num].height = 36
             else:
-                ctx_cell.border = Border(left=thin, right=medium, top=thin, bottom=thin)
+                # 1 line: plain text (e.g. 'ICPC regionalist in 2023' or 'Codeforces : NA')
+                cell_c.value = item["text"]
+                cell_c.font = normal_font
+                ws.row_dimensions[row_num].height = 20
 
-            ctx_cell.alignment = mid_left
-
-        current_row += 3   # advance by 3 sub-rows
+        current_row += n_sub
 
     # ── Column widths ────────────────────────────────────────
-    ws.column_dimensions["A"].width = 22
-    ws.column_dimensions["B"].width = 55
-    ws.column_dimensions["C"].width = 42
+    ws.column_dimensions["A"].width = 24
+    ws.column_dimensions["B"].width = 60
+    ws.column_dimensions["C"].width = 50
 
-    # ── Row heights (all data rows) ───────────────────────────
-    for row_idx in range(2, ws.max_row + 1):
-        ws.row_dimensions[row_idx].height = 18
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
 
     buffer = io.BytesIO()
     wb.save(buffer)
