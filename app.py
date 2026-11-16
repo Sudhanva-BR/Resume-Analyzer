@@ -467,9 +467,11 @@ def _to_excel(results: list[dict]) -> bytes:
     wb.save(buffer)
     return buffer.getvalue()
 
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    return buffer.getvalue()
+
+def _reset_app():
+    """Reset input field and cleared cached analysis results."""
+    st.session_state["urls_input"] = ""
+    st.session_state.pop("results", None)
 
 
 # ──────────────── UI ────────────────
@@ -492,11 +494,14 @@ with st.container():
             "https://drive.google.com/file/d/1AbCdEfGh.../view?usp=sharing\n"
             "https://example.com/resume.pdf"
         ),
+        key="urls_input",
     )
 
-    col_btn, col_info = st.columns([1, 3])
+    col_btn, col_reset, col_info = st.columns([1.2, 0.8, 2.5])
     with col_btn:
         analyze_btn = st.button("🚀 Analyze Resumes", type="primary", use_container_width=True)
+    with col_reset:
+        st.button("🔄 Reset", on_click=_reset_app, key="reset_top", use_container_width=True)
     with col_info:
         st.caption("ℹ️  Only public profile data is used. Checks official contest plagiarism & penalty flags.")
 
@@ -572,7 +577,7 @@ if "results" in st.session_state and st.session_state["results"]:
     # --- Download buttons ---
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
     st.markdown("#### 💾 Download Results")
-    dl_col1, dl_col2, _ = st.columns([1, 1, 3])
+    dl_col1, dl_col2, dl_col3, _ = st.columns([1, 1, 1, 2])
     with dl_col1:
         st.download_button(
             "📥 Download CSV",
@@ -589,6 +594,8 @@ if "results" in st.session_state and st.session_state["results"]:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
+    with dl_col3:
+        st.button("🔄 Reset All", on_click=_reset_app, key="reset_bottom", use_container_width=True)
 
 # ── Footer ──
 st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
