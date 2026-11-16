@@ -541,6 +541,92 @@ def _extract_teaching_experience(text: str) -> dict:
     return {"has_experience": True, "duration_text": None}
 
 
+# ───────────────── Graduation year extraction ──────────────────
+
+def _extract_graduation_year(text: str) -> int | None:
+    """
+    Extract graduation / passing year from education section or degree lines.
+    """
+    if not text:
+        return None
+    lines = text.splitlines()
+
+    # 1. Look for explicit graduation keywords anywhere
+    m_exp = re.search(
+        r"(?:graduation\s*(?:year)?|graduating|graduated|batch\s*of|class\s*of|passing\s*year|year\s*of\s*passing|expected\s*(?:graduation)?)\s*[:\-–—]?\s*(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+)?(20[123]\d)\b",
+        text,
+        re.I,
+    )
+    if m_exp:
+        return int(m_exp.group(1))
+
+    # 2. Extract Education section lines
+    edu_lines = []
+    in_edu = False
+    stop_headers = re.compile(
+        r"^(?:experience|work\s+experience|professional\s+experience|employment|projects|technical\s+skills|skills|achievements|certifications|publications|extracurricular|leadership)\b",
+        re.I,
+    )
+    edu_header = re.compile(
+        r"^(?:education|academic(?:s|\s+background|\s+qualifications|\s+details)?|qualifications)\b",
+        re.I,
+    )
+
+    for line in lines:
+        stripped = line.strip()
+        if edu_header.match(stripped):
+            in_edu = True
+            continue
+        elif in_edu and stop_headers.match(stripped):
+            in_edu = False
+            break
+        elif in_edu:
+            edu_lines.append(stripped)
+
+    edu_text = " \n ".join(edu_lines) if edu_lines else text
+
+    valid_years = []
+
+    # Pattern for ranges like '2018 - 2022', '2020-2024', 'Aug 2018 - May 2022'
+    range_pat = re.compile(
+        r"(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+)?(20[012]\d)\s*[-–—/to]+\s*(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+)?(20[123]\d)\b",
+        re.I,
+    )
+    for m in range_pat.finditer(edu_text):
+        y = int(m.group(2))
+        if 2015 <= y <= 2030:
+            valid_years.append(y)
+
+    # Pattern for '2022 - Present' in education -> start + 4
+    if in_edu or edu_lines:
+        pres_pat = re.compile(
+            r"\b(20[12]\d)\s*[-–—/to]+\s*(?:[Pp]resent|[Cc]urrent|[Oo]ngoing)\b",
+            re.I,
+        )
+        for m in pres_pat.finditer(edu_text):
+            y_start = int(m.group(1))
+            if 2015 <= y_start <= 2026:
+                valid_years.append(y_start + 4)
+
+    if valid_years:
+        return max(valid_years)
+
+    # Pattern for single year near degree keywords
+    deg_pat = re.compile(
+        r"(?:bachelor|b\.?tech|b\.?e\b|bca|m\.?tech|m\.?s\b|mca|master|degree|institute|university|college)[^.\n]{0,80}?\b(20[123]\d)\b",
+        re.I,
+    )
+    for m in deg_pat.finditer(edu_text):
+        y = int(m.group(1))
+        if 2015 <= y <= 2030:
+            valid_years.append(y)
+
+    if valid_years:
+        return max(valid_years)
+
+    return None
+
+
 # ───────────────── Public parser entrypoint ──────────────────
 
 def parse_resume(url: str) -> dict:
@@ -561,6 +647,8 @@ def parse_resume(url: str) -> dict:
             "lc_text_rating": int | None,
             "icpc_achievements": list[dict],
             "portfolio_links": list[str],
+            "teaching_experience": dict,
+            "graduation_year": int | None,
             "error": str | None,
         }
     """
@@ -579,6 +667,7 @@ def parse_resume(url: str) -> dict:
         "icpc_achievements": [],
         "portfolio_links": [],
         "teaching_experience": {"has_experience": False, "duration_text": None},
+        "graduation_year": None,
         "error": None,
     }
 
@@ -618,5 +707,6 @@ def parse_resume(url: str) -> dict:
     result["icpc_achievements"] = _extract_icpc_achievements(text, detailed_links)
     result["portfolio_links"] = _extract_portfolio_links(text, detailed_links)
     result["teaching_experience"] = _extract_teaching_experience(text)
+    result["graduation_year"] = _extract_graduation_year(text)
 
     return result

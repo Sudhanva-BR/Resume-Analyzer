@@ -7,7 +7,7 @@ A Streamlit web app that analyzes competitive programming profiles from resume P
 ## Features
 
 - **Bulk Resume Analysis** – Paste multiple PDF URLs (Google Drive, CodeChef recruiter downloads, direct HTTP)
-- **Auto-Extraction** – Candidate names, CP handles, inline ratings, ICPC achievements, portfolio links, and teaching experience
+- **Auto-Extraction** – Candidate names, CP handles, inline ratings, ICPC achievements, portfolio links, teaching experience, and graduation year
 - **Live Stats & Total Contests** – Max rating, contests to peak rating, and total contests attempted across Codeforces, CodeChef, and LeetCode
 - **Cheating & Integrity Detection** – Official contest plagiarism flags, MOSS penalties, and disqualification detection
 - **Role-Based Shortlisting (L1, L2, L3)**:
@@ -34,7 +34,11 @@ A Streamlit web app that analyzes competitive programming profiles from resume P
 - **Formatted Excel Export**:
   - Columns: Name | Resume link | context | Resume Shortlisting Priority (P1 > P2 > P3) | Priority for (L1, L2, L3) | Candidate Fitment Score (out of 5)
   - Context format: `{Platform} : {rating} in {c} contest and attempted {t} contest in total` + direct profile link below
-  - Extra sub-row for teaching experience (`Have teaching experience of {duration}` or `Have experience in teaching`)
+  - Extra sub-rows for:
+    - ICPC achievements (if present)
+    - Portfolio link (if present)
+    - Graduation year (`Graduation Year : {year}`, if found)
+    - Teaching experience (`Have teaching experience of {duration}`, if present)
   - Merged vertical columns aligned to match specification
 
 ---

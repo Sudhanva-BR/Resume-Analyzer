@@ -477,6 +477,7 @@ def _build_results_df(results: list[dict]) -> pd.DataFrame:
                 "Priority": r.get("priority", "NA"),
                 "Level": r.get("level", "NA"),
                 "Fitment Score": r.get("fitment_score", "NA"),
+                "Graduation Year": r.get("graduation_year") or "NA",
                 "Teaching Exp": teach_display,
                 "Resume Link": r.get("url", ""),
                 "ICPC / Achievements": icpc_display,
@@ -588,6 +589,14 @@ def _to_excel(results: list[dict]) -> bytes:
             sub_items.append({
                 "text": "check portfolio",
                 "url": port_url,
+            })
+
+        # 3. Graduation year (if present)
+        grad_year = r.get("graduation_year")
+        if grad_year:
+            sub_items.append({
+                "text": f"Graduation Year : {grad_year}",
+                "url": None,
             })
 
         # Helper for platform item
@@ -825,6 +834,7 @@ if analyze_btn:
             parsed["cheating_status"] = "NA"
             parsed["caught_penalties"] = []
             parsed["teaching_experience"] = {"has_experience": False, "duration_text": None}
+            parsed["graduation_year"] = None
             parsed["priority"] = "P2"
             parsed["level"] = current_level
             parsed["fitment_score"] = 0
