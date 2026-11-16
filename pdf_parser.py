@@ -426,6 +426,121 @@ def _extract_portfolio_links(text: str, detailed_links: list[dict]) -> list[str]
     return found
 
 
+# ───────────────── Teaching experience extraction ──────────────────
+
+_TEACHING_KEYWORDS = re.compile(
+    r"\b(?:teaching\s+assistant|teaching\s+experience|teaching\s+fellow|"
+    r"tutor(?:ing)?|instructor|mentor(?:ing)?|faculty|taught|trainer|"
+    r"coaching|academic\s+mentor)\b",
+    re.I,
+)
+
+_DURATION_INLINE = re.compile(
+    r"(\d+)\+?\s*(?:years?|yrs?)\b(?:\s*(?:and|&)\s*(\d+)\s*(?:months?|mos?))?"
+    r"|(\d+)\+?\s*(?:months?|mos?)\b",
+    re.I,
+)
+
+_DATE_RANGE = re.compile(
+    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    r"\s+(\d{4})\s*[-–—]\s*"
+    r"(?:(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    r"\s+(\d{4})|[Pp]resent|[Cc]urrent)",
+    re.I,
+)
+
+_MONTH_MAP = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6,
+    "jul": 7, "july": 7, "aug": 8, "august": 8, "sep": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+
+_DATE_RANGE_FULL = re.compile(
+    r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    r"\s+(\d{4})\s*[-–—]\s*"
+    r"(?:(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    r"\s+(\d{4})|([Pp]resent|[Cc]urrent))",
+    re.I,
+)
+
+
+def _extract_teaching_experience(text: str) -> dict:
+    """
+    Scan resume text for teaching / tutoring / mentoring experience.
+    Returns:
+        {"has_experience": True/False, "duration_text": "1 year" or None}
+    """
+    if not _TEACHING_KEYWORDS.search(text):
+        return {"has_experience": False, "duration_text": None}
+
+    # Try to find explicit inline durations near teaching keywords
+    for line in text.splitlines():
+        if not _TEACHING_KEYWORDS.search(line):
+            continue
+        m = _DURATION_INLINE.search(line)
+        if m:
+            if m.group(1):  # N year(s) [and M month(s)]
+                years = int(m.group(1))
+                months = int(m.group(2)) if m.group(2) else 0
+                parts = []
+                if years:
+                    parts.append(f"{years} year{'s' if years != 1 else ''}")
+                if months:
+                    parts.append(f"{months} month{'s' if months != 1 else ''}")
+                return {"has_experience": True, "duration_text": " and ".join(parts)}
+            elif m.group(3):  # N month(s)
+                months = int(m.group(3))
+                return {"has_experience": True, "duration_text": f"{months} month{'s' if months != 1 else ''}"}
+
+    # Try to find date ranges near teaching keywords
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if not _TEACHING_KEYWORDS.search(line):
+            continue
+        # Search this line and the next 3 lines for a date range
+        context = " ".join(lines[max(0, i - 1) : i + 4])
+        dm = _DATE_RANGE_FULL.search(context)
+        if dm:
+            start_month_str = dm.group(1).lower()[:3]
+            start_year = int(dm.group(2))
+            start_month = _MONTH_MAP.get(start_month_str, 1)
+
+            if dm.group(5):  # "Present" / "Current"
+                from datetime import datetime
+                now = datetime.now()
+                end_month, end_year = now.month, now.year
+            else:
+                end_month_str = dm.group(3).lower()[:3]
+                end_year = int(dm.group(4))
+                end_month = _MONTH_MAP.get(end_month_str, 1)
+
+            total_months = (end_year - start_year) * 12 + (end_month - start_month)
+            if total_months < 0:
+                total_months = 0
+
+            if total_months >= 12:
+                years = total_months // 12
+                remaining = total_months % 12
+                parts = [f"{years} year{'s' if years != 1 else ''}"]
+                if remaining:
+                    parts.append(f"{remaining} month{'s' if remaining != 1 else ''}")
+                duration = " and ".join(parts)
+            elif total_months > 0:
+                duration = f"{total_months} month{'s' if total_months != 1 else ''}"
+            else:
+                duration = None
+
+            return {"has_experience": True, "duration_text": duration}
+
+    # Has teaching keywords but couldn't parse duration
+    return {"has_experience": True, "duration_text": None}
+
+
 # ───────────────── Public parser entrypoint ──────────────────
 
 def parse_resume(url: str) -> dict:
@@ -463,6 +578,7 @@ def parse_resume(url: str) -> dict:
         "lc_text_rating": None,
         "icpc_achievements": [],
         "portfolio_links": [],
+        "teaching_experience": {"has_experience": False, "duration_text": None},
         "error": None,
     }
 
@@ -501,5 +617,6 @@ def parse_resume(url: str) -> dict:
     # ICPC achievements and portfolio links
     result["icpc_achievements"] = _extract_icpc_achievements(text, detailed_links)
     result["portfolio_links"] = _extract_portfolio_links(text, detailed_links)
+    result["teaching_experience"] = _extract_teaching_experience(text)
 
     return result

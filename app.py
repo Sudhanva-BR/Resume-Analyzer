@@ -222,10 +222,12 @@ def _merge_stats(parsed: dict, profiles: dict) -> dict:
 
         final_rating = _best_rating(api_stats.get("max_rating"), text_rating)
         final_contests = api_stats.get("contests_to_max")
+        total_contests = api_stats.get("total_contests")
 
         result[f"{key_prefix}_stats"] = {
             "max_rating": final_rating,
             "contests_to_max": final_contests,
+            "total_contests": total_contests,
             "penalised": api_stats.get("penalised", False),
             "penalty_details": api_stats.get("penalty_details"),
             "error": api_stats.get("error"),
@@ -250,6 +252,195 @@ def _platform_profile_url(platform: str, handle: str | None) -> str | None:
     return None
 
 
+def _parse_teaching_duration_to_months(duration_text: str | None) -> int | None:
+    """Parse a duration string like '1 year', '6 months', '2+ years' into total months."""
+    if not duration_text:
+        return None
+    text = duration_text.lower().strip()
+    total_months = 0
+    y_m = re.search(r"(\d+)\+?\s*(?:years?|yrs?)", text)
+    if y_m:
+        total_months += int(y_m.group(1)) * 12
+    m_m = re.search(r"(\d+)\+?\s*(?:months?|mos?)", text)
+    if m_m:
+        total_months += int(m_m.group(1))
+    return total_months if total_months > 0 else None
+
+
+def _detect_candidate_level(result: dict) -> str:
+    """
+    Determine whether candidate is L3, L2, or L1 based on their ratings and experience:
+    - L3: CF 1800+ or CC 2200+ or LC 2400+ and >= 6 months experience
+    - L2: CF 1600+ or CC 2000+ or LC 2200+ and >= 6 months experience
+    - L1: CF 1400+ or CC 1600+ or LC 1850+ and without exp or < 6 months experience
+    """
+    cf_rating = (result.get("cf_stats") or {}).get("max_rating")
+    cc_rating = (result.get("cc_stats") or {}).get("max_rating")
+    lc_rating = (result.get("lc_stats") or {}).get("max_rating")
+
+    teaching = result.get("teaching_experience") or {}
+    has_teaching = teaching.get("has_experience", False)
+    duration_text = teaching.get("duration_text")
+    months = _parse_teaching_duration_to_months(duration_text)
+
+    has_at_least_6m = False
+    if has_teaching:
+        if months is not None:
+            has_at_least_6m = (months >= 6)
+        else:
+            has_at_least_6m = True
+
+    # 1. Check L3: CF 1800+ or CC 2200+ or LC 2400+ and >= 6 months experience
+    l3_rating = (
+        (cf_rating is not None and cf_rating >= 1800) or
+        (cc_rating is not None and cc_rating >= 2200) or
+        (lc_rating is not None and lc_rating >= 2400)
+    )
+    if l3_rating and has_at_least_6m:
+        return "L3"
+
+    # 2. Check L2: CF 1600+ or CC 2000+ or LC 2200+ and >= 6 months experience
+    l2_rating = (
+        (cf_rating is not None and cf_rating >= 1600) or
+        (cc_rating is not None and cc_rating >= 2000) or
+        (lc_rating is not None and lc_rating >= 2200)
+    )
+    if l2_rating and has_at_least_6m:
+        return "L2"
+
+    # 3. Default to L1
+    return "L1"
+
+
+def _compute_priority_and_fitment(result: dict, level: str) -> dict:
+    """
+    Compute Resume Shortlisting Priority (P1/P2/P3) and Candidate Fitment Score (0-5)
+    based on the selected role level (or Auto-detected L1/L2/L3).
+    """
+    effective_level = _detect_candidate_level(result) if level == "Auto (Detect Level)" else level
+
+    THRESHOLDS = {
+        "L1": {
+            "cf": 1400, "cc": 1600, "lc": 1850,
+            "min_exp_months": 0, "contest_p3_all": 5, "contest_p1_given": 20,
+        },
+        "L2": {
+            "cf": 1600, "cc": 2000, "lc": 2200,
+            "min_exp_months": 6, "contest_p3_all": 10, "contest_p1_given": 30,
+        },
+        "L3": {
+            "cf": 1800, "cc": 2200, "lc": 2400,
+            "min_exp_months": 6, "contest_p3_all": 5, "contest_p1_given": 40,
+        },
+    }
+    t = THRESHOLDS.get(effective_level, THRESHOLDS["L1"])
+
+    # 1. Criteria 1: Rating threshold
+    cf_rating = (result.get("cf_stats") or {}).get("max_rating")
+    cc_rating = (result.get("cc_stats") or {}).get("max_rating")
+    lc_rating = (result.get("lc_stats") or {}).get("max_rating")
+
+    cf_met = cf_rating is not None and cf_rating >= t["cf"]
+    cc_met = cc_rating is not None and cc_rating >= t["cc"]
+    lc_met = lc_rating is not None and (
+        lc_rating >= t["lc"] or (effective_level == "L3" and lc_rating >= 1850 and (cf_met or cc_met))
+    )
+
+    criteria1_met = cf_met or cc_met or lc_met
+
+    # 2. Criteria 2: Teaching experience
+    teaching = result.get("teaching_experience") or {}
+    has_teaching = teaching.get("has_experience", False)
+    duration_text = teaching.get("duration_text")
+    months = _parse_teaching_duration_to_months(duration_text)
+
+    criteria2_met = False
+    if effective_level == "L1":
+        # For L1: "no need of experience only rating is enough"
+        criteria2_met = True
+    else:
+        # L2 / L3: at least 6 months experience
+        if has_teaching:
+            if months is not None:
+                criteria2_met = (months >= t["min_exp_months"])
+            else:
+                criteria2_met = True
+
+    # 3. Fitment Score calculation
+    if effective_level == "L1":
+        # "for L1, keep base as 3, if he have icpc +1, if his rating is very high +1"
+        has_icpc = bool(result.get("icpc_achievements"))
+        very_high = (
+            (cf_rating is not None and cf_rating >= 1600) or
+            (cc_rating is not None and cc_rating >= 1800) or
+            (lc_rating is not None and lc_rating >= 2000)
+        )
+        if criteria1_met:
+            fitment = 3
+            if has_icpc:
+                fitment += 1
+            if very_high:
+                fitment += 1
+            fitment = min(5, fitment)
+        else:
+            fitment = 2
+            if has_icpc:
+                fitment += 1
+    else:
+        fitment = 5
+        if not criteria1_met:
+            fitment -= 1
+        if not criteria2_met:
+            fitment -= 1
+
+    # 4. Priority calculation
+    caught_count = len(result.get("caught_penalties", []))
+
+    # Contest counts across all platforms where candidate participated
+    active_contests_to_max = []
+    given_contest_counts = []
+    for prefix in ["cf", "cc", "lc"]:
+        st = result.get(f"{prefix}_stats") or {}
+        r = st.get("max_rating")
+        c = st.get("contests_to_max")
+        tot = st.get("total_contests")
+        if r is not None and c is not None:
+            active_contests_to_max.append(c)
+        if tot is not None:
+            given_contest_counts.append(tot)
+        elif c is not None:
+            given_contest_counts.append(c)
+
+    priority = "P2"
+
+    # P3 rule:
+    # "if he is caught in more than one question of(reached max rating in less than X contest in codeforces and codechef and leetcode all) than P3"
+    if caught_count > 1:
+        priority = "P3"
+    elif active_contests_to_max and all(c < t["contest_p3_all"] for c in active_contests_to_max):
+        priority = "P3"
+    elif effective_level == "L1":
+        # For L1: only rating is enough, if given > 20 contests and criteria 1 met -> P1
+        has_given_enough = given_contest_counts and (max(given_contest_counts) > t["contest_p1_given"] or sum(given_contest_counts) > t["contest_p1_given"])
+        if criteria1_met and has_given_enough:
+            priority = "P1"
+        else:
+            priority = "P2"
+    else:
+        # For L2/L3: needs experience and given enough contests -> P1
+        has_given_enough = given_contest_counts and (max(given_contest_counts) > t["contest_p1_given"] or sum(given_contest_counts) > t["contest_p1_given"])
+        if criteria1_met and criteria2_met and has_given_enough:
+            priority = "P1"
+        else:
+            priority = "P2"
+
+    return {
+        "priority": priority,
+        "level": effective_level,
+        "fitment_score": max(0, fitment),
+    }
+
+
 def _build_results_df(results: list[dict]) -> pd.DataFrame:
     """Convert analysis results into a clean display DataFrame."""
     rows = []
@@ -264,22 +455,35 @@ def _build_results_df(results: list[dict]) -> pd.DataFrame:
         port_list = r.get("portfolio_links", [])
         port_display = port_list[0] if port_list else "NA"
 
+        teaching = r.get("teaching_experience") or {}
+        teach_display = (
+            f"Yes ({teaching.get('duration_text')})"
+            if teaching.get("duration_text")
+            else ("Yes" if teaching.get("has_experience") else "No")
+        )
+
+        def _stats_disp(s):
+            m = _val(s.get("max_rating"))
+            c = _val(s.get("contests_to_max"))
+            t = _val(s.get("total_contests"))
+            if m == "NA":
+                return "NA"
+            return f"{m} in {c} contests (total: {t})"
+
         rows.append(
             {
                 "#": idx,
                 "Name": r["name"],
+                "Priority": r.get("priority", "NA"),
+                "Level": r.get("level", "NA"),
+                "Fitment Score": r.get("fitment_score", "NA"),
+                "Teaching Exp": teach_display,
                 "Resume Link": r.get("url", ""),
                 "ICPC / Achievements": icpc_display,
                 "Portfolio": port_display,
-                "Codeforces": (
-                    f"{_val(r['cf_stats']['max_rating'])} in {_val(r['cf_stats']['contests_to_max'])} contests"
-                ),
-                "CodeChef": (
-                    f"{_val(r['cc_stats']['max_rating'])} in {_val(r['cc_stats']['contests_to_max'])} contests"
-                ),
-                "LeetCode": (
-                    f"{_val(r['lc_stats']['max_rating'])} in {_val(r['lc_stats']['contests_to_max'])} contests"
-                ),
+                "Codeforces": _stats_disp(r.get("cf_stats", {})),
+                "CodeChef": _stats_disp(r.get("cc_stats", {})),
+                "LeetCode": _stats_disp(r.get("lc_stats", {})),
                 "Contest Penalty / Caught": r.get("cheating_status") or "NA",
             }
         )
@@ -289,15 +493,16 @@ def _build_results_df(results: list[dict]) -> pd.DataFrame:
 def _to_excel(results: list[dict]) -> bytes:
     """
     Build Excel matching the exact format shown in the reference image:
-    Columns: Name | Resume link | context
-    - Name and Resume link are vertically merged across all sub-rows for each candidate.
+    Columns: Name | Resume link | context | Resume Shortlisting Priority (P1 > P2 > P3) | Priority for (L1, L2, L3) | Candidate Fitment Score (out of 5) 0 - Poor , 5 - Good
+    - Name, Resume link, Priority, Priority for, and Fitment Score are vertically merged across all sub-rows for each candidate.
     - Column 3 (context) has separate sub-rows with horizontal grid lines:
-        1. ICPC achievement (if present, e.g. 'ICPC regionalist in 2023')
+        1. ICPC achievement (if present, e.g. 'ICPC regionalist in 2025')
         2. Portfolio link (if present, 'check portfolio' with url below)
-        3. Codeforces: Line 1 = 'Codeforces : {rating} in {contests} contest', Line 2 = profile URL (blue, underlined)
-        4. CodeChef: Line 1 = 'CodeChef : {rating} in {contests} contest', Line 2 = profile URL (blue, underlined)
-        5. LeetCode: Line 1 = 'LeetCode : {rating} in {contests} contest', Line 2 = profile URL (blue, underlined)
-    - If a platform is not present, shows 'Codeforces : NA' without a second URL line.
+        3. Codeforces: Line 1 = 'Codeforces : {rating} in {c} contest and attempted {t} contest in total', Line 2 = profile URL (blue, underlined)
+        4. CodeChef: Line 1 = 'CodeChef : {rating} in {c} contest and attempted {t} contest in total', Line 2 = profile URL (blue, underlined)
+        5. Teaching experience: 'Have teaching experience of {dur}' or 'Have experience in teaching'
+        6. LeetCode: Line 1 = 'LeetCode : {rating} in {c} contest and attempted {t} contest in total', Line 2 = profile URL (blue, underlined)
+    - If a platform is not present, shows '{Platform} : NA' without a second URL line.
     """
     import openpyxl
     from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
@@ -320,26 +525,35 @@ def _to_excel(results: list[dict]) -> bytes:
     inline_black = InlineFont(rFont="Calibri", sz=11, color="000000")
     inline_blue  = InlineFont(rFont="Calibri", sz=11, color="0563C1", u="single")
 
-    center_bottom = Alignment(horizontal="center", vertical="bottom", wrap_text=True)
     left_bottom   = Alignment(horizontal="left",   vertical="bottom", wrap_text=True)
+    right_bottom  = Alignment(horizontal="right",  vertical="bottom", wrap_text=True)
+    center_bottom = Alignment(horizontal="center", vertical="bottom", wrap_text=True)
     mid_left      = Alignment(horizontal="left",   vertical="center", wrap_text=True)
     center_wrap   = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-    PLATFORM_ORDER = [
-        ("codeforces", "Codeforces"),
-        ("codechef",   "CodeChef"),
-        ("leetcode",   "LeetCode"),
-    ]
+    left_wrap     = Alignment(horizontal="left",   vertical="center", wrap_text=True)
 
     # ── Headers ─────────────────────────────────────────────
-    headers = ["Name", "Resume link", "context"]
-    for col_idx, h in enumerate(headers, 1):
+    headers = [
+        ("Name", center_wrap),
+        ("Resume link", center_wrap),
+        ("context", center_wrap),
+        ("Resume\nShortlisting\nPriority\n(P1 > P2 > P3)", left_wrap),
+        ("Priority for\n(L1, L2, L3)", left_wrap),
+        ("Candidate Fitment Score\n(out of 5)\n0 - Poor , 5 - Good", left_wrap),
+    ]
+
+    for col_idx, (h, align) in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col_idx, value=h)
         cell.font = bold_font
         cell.fill = header_fill
-        cell.border = Border(left=thin, right=thin, top=medium, bottom=medium)
-        cell.alignment = center_wrap
-    ws.row_dimensions[1].height = 24
+        cell.border = Border(
+            left=medium if col_idx == 1 else thin,
+            right=medium if col_idx == len(headers) else thin,
+            top=medium,
+            bottom=medium,
+        )
+        cell.alignment = align
+    ws.row_dimensions[1].height = 65
 
     # ── Data rows ───────────────────────────────────────────
     current_row = 2
@@ -354,12 +568,12 @@ def _to_excel(results: list[dict]) -> bytes:
             "leetcode":   lc_handle,
         }
         stats_map = {
-            "codeforces": r["cf_stats"],
-            "codechef":   r["cc_stats"],
-            "leetcode":   r["lc_stats"],
+            "codeforces": r.get("cf_stats", {}),
+            "codechef":   r.get("cc_stats", {}),
+            "leetcode":   r.get("lc_stats", {}),
         }
 
-        # Build sub-row items for Column C
+        # Build sub-row items for Column C (context)
         sub_items = []
 
         # 1. ICPC achievements
@@ -376,36 +590,54 @@ def _to_excel(results: list[dict]) -> bytes:
                 "url": port_url,
             })
 
-        # 3. Competitive programming platforms
-        for key, label in PLATFORM_ORDER:
-            handle = handles[key]
-            stats = stats_map[key]
-            prof_url = _platform_profile_url(key, handle)
+        # Helper for platform item
+        def _make_platform_item(key, label):
+            h = handles[key]
+            st = stats_map[key]
+            prof_url = _platform_profile_url(key, h)
+            r_val = st.get("max_rating")
+            c_val = st.get("contests_to_max")
+            t_val = st.get("total_contests")
 
-            r_val = stats["max_rating"]
-            c_val = stats["contests_to_max"]
             if r_val is not None:
                 c_str = f"{c_val} contest" if c_val is not None else "NA contest"
-                text = f"{label} : {r_val} in {c_str}"
-                sub_items.append({
-                    "text": text,
-                    "url": prof_url,
-                })
+                if t_val is not None:
+                    text = f"{label} : {r_val} in {c_str} and attempted {t_val} contest in total"
+                else:
+                    text = f"{label} : {r_val} in {c_str}"
+                return {"text": text, "url": prof_url}
             else:
-                sub_items.append({
-                    "text": f"{label} : NA",
-                    "url": None,
-                })
+                return {"text": f"{label} : NA", "url": None}
+
+        # 3. Codeforces
+        sub_items.append(_make_platform_item("codeforces", "Codeforces"))
+
+        # 4. CodeChef
+        sub_items.append(_make_platform_item("codechef", "CodeChef"))
+
+        # 5. Teaching experience (if candidate has teaching experience)
+        teaching = r.get("teaching_experience") or {}
+        if teaching.get("has_experience"):
+            dur = teaching.get("duration_text")
+            if dur:
+                sub_items.append({"text": f"Have teaching experience of {dur}", "url": None})
+            else:
+                sub_items.append({"text": "Have experience in teaching", "url": None})
+
+        # 6. LeetCode
+        sub_items.append(_make_platform_item("leetcode", "LeetCode"))
 
         n_sub = len(sub_items)
         start_row = current_row
         end_row = current_row + n_sub - 1
 
-        # ── Col A: Name (merged vertically) ──────────────────
-        ws.merge_cells(start_row=start_row, start_column=1, end_row=end_row, end_column=1)
-
-        # ── Col B: Resume link (merged vertically) ───────────
-        ws.merge_cells(start_row=start_row, start_column=2, end_row=end_row, end_column=2)
+        # ── Merged columns: A (1), B (2), D (4), E (5), F (6) ────────
+        if n_sub > 1:
+            ws.merge_cells(start_row=start_row, start_column=1, end_row=end_row, end_column=1)
+            ws.merge_cells(start_row=start_row, start_column=2, end_row=end_row, end_column=2)
+            ws.merge_cells(start_row=start_row, start_column=4, end_row=end_row, end_column=4)
+            ws.merge_cells(start_row=start_row, start_column=5, end_row=end_row, end_column=5)
+            ws.merge_cells(start_row=start_row, start_column=6, end_row=end_row, end_column=6)
 
         # ── Write and style all sub-rows ─────────────────────
         for sub_idx, item in enumerate(sub_items):
@@ -421,7 +653,7 @@ def _to_excel(results: list[dict]) -> bytes:
             if is_top:
                 cell_a.value = r["name"]
                 cell_a.font = normal_font
-                cell_a.alignment = center_bottom
+                cell_a.alignment = left_bottom
 
             # Col B: Resume link
             cell_b = ws.cell(row=row_num, column=2)
@@ -438,7 +670,7 @@ def _to_excel(results: list[dict]) -> bytes:
 
             # Col C: Sub-row item
             cell_c = ws.cell(row=row_num, column=3)
-            cell_c.border = Border(left=thin, right=medium, top=t_side, bottom=b_side)
+            cell_c.border = Border(left=thin, right=thin, top=t_side, bottom=b_side)
             cell_c.alignment = mid_left
 
             if item.get("url"):
@@ -449,19 +681,46 @@ def _to_excel(results: list[dict]) -> bytes:
                 )
                 cell_c.value = rt
                 cell_c.hyperlink = item["url"]
-                ws.row_dimensions[row_num].height = 36
+                ws.row_dimensions[row_num].height = 40
             else:
-                # 1 line: plain text (e.g. 'ICPC regionalist in 2023' or 'Codeforces : NA')
+                # 1 line: plain text (e.g. 'ICPC regionalist in 2023', 'Have teaching experience of 1 year', or 'Codeforces : NA')
                 cell_c.value = item["text"]
                 cell_c.font = normal_font
                 ws.row_dimensions[row_num].height = 20
+
+            # Col D: Resume Shortlisting Priority
+            cell_d = ws.cell(row=row_num, column=4)
+            cell_d.border = Border(left=thin, right=thin, top=t_side, bottom=b_side)
+            if is_top:
+                cell_d.value = r.get("priority", "")
+                cell_d.font = normal_font
+                cell_d.alignment = left_bottom
+
+            # Col E: Priority for (L1, L2, L3)
+            cell_e = ws.cell(row=row_num, column=5)
+            cell_e.border = Border(left=thin, right=thin, top=t_side, bottom=b_side)
+            if is_top:
+                cell_e.value = r.get("level", "")
+                cell_e.font = normal_font
+                cell_e.alignment = left_bottom
+
+            # Col F: Candidate Fitment Score
+            cell_f = ws.cell(row=row_num, column=6)
+            cell_f.border = Border(left=thin, right=medium, top=t_side, bottom=b_side)
+            if is_top:
+                cell_f.value = r.get("fitment_score", "")
+                cell_f.font = normal_font
+                cell_f.alignment = right_bottom
 
         current_row += n_sub
 
     # ── Column widths ────────────────────────────────────────
     ws.column_dimensions["A"].width = 24
-    ws.column_dimensions["B"].width = 60
-    ws.column_dimensions["C"].width = 50
+    ws.column_dimensions["B"].width = 55
+    ws.column_dimensions["C"].width = 68
+    ws.column_dimensions["D"].width = 18
+    ws.column_dimensions["E"].width = 16
+    ws.column_dimensions["F"].width = 24
 
     buffer = io.BytesIO()
     wb.save(buffer)
@@ -497,13 +756,38 @@ with st.container():
         key="urls_input",
     )
 
-    col_btn, col_reset, col_info = st.columns([1.2, 0.8, 2.5])
+    col_level, col_info = st.columns([1.5, 3])
+    with col_level:
+        selected_level = st.selectbox(
+            "🎯 Select Shortlisting Level",
+            options=["Auto (Detect Level)", "L1", "L2", "L3"],
+            index=0,
+            key="selected_level",
+            help=(
+                "Auto: Automatically determines L1, L2, or L3 for each candidate\n"
+                "L1: CF 1400+ / CC 1600+ / LC 1850+ (no exp needed) · Base fitment: 3 (+1 ICPC, +1 high rating)\n"
+                "L2: CF 1600+ / CC 2000+ / LC 2200+ & ≥6 mos exp\n"
+                "L3: CF 1800+ / CC 2200+ / LC 2400+ & ≥6 mos exp"
+            ),
+        )
+    with col_info:
+        st.markdown(
+            """
+            <div style="font-size:0.82rem; color:#94a3b8; margin-top:1.4rem; line-height:1.4;">
+                <b>Auto:</b> Detects L1, L2, or L3 automatically per candidate<br>
+                <b>L1:</b> CF 1400+ / CC 1600+ / LC 1850+ (no exp needed) · Base fitment: 3 (+1 ICPC, +1 high rating) · P1: &gt;20 contests<br>
+                <b>L2:</b> CF 1600+ / CC 2000+ / LC 2200+ (≥6 mos exp) · P1: &gt;30 contests + exp · P3: all &lt;10 contests<br>
+                <b>L3:</b> CF 1800+ / CC 2200+ / LC 2400+ (≥6 mos exp) · P1: &gt;40 contests + exp · P3: all &lt;5 contests
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    col_btn, col_reset, _ = st.columns([1.2, 0.8, 3])
     with col_btn:
         analyze_btn = st.button("🚀 Analyze Resumes", type="primary", use_container_width=True)
     with col_reset:
         st.button("🔄 Reset", on_click=_reset_app, key="reset_top", use_container_width=True)
-    with col_info:
-        st.caption("ℹ️  Only public profile data is used. Checks official contest plagiarism & penalty flags.")
 
 # --- Analysis logic ---
 if analyze_btn:
@@ -524,6 +808,7 @@ if analyze_btn:
     results: list[dict] = []
     progress = st.progress(0, text="Starting analysis…")
     status_area = st.empty()
+    current_level = st.session_state.get("selected_level", "Auto (Detect Level)")
 
     for i, url in enumerate(urls, 1):
         pct = (i - 1) / len(urls)
@@ -534,11 +819,15 @@ if analyze_btn:
         parsed = parse_resume(url)
 
         if parsed.get("error"):
-            parsed["cf_stats"] = {"max_rating": None, "contests_to_max": None, "error": parsed["error"]}
-            parsed["cc_stats"] = {"max_rating": None, "contests_to_max": None, "error": parsed["error"]}
-            parsed["lc_stats"] = {"max_rating": None, "contests_to_max": None, "error": parsed["error"]}
+            parsed["cf_stats"] = {"max_rating": None, "contests_to_max": None, "total_contests": None, "error": parsed["error"]}
+            parsed["cc_stats"] = {"max_rating": None, "contests_to_max": None, "total_contests": None, "error": parsed["error"]}
+            parsed["lc_stats"] = {"max_rating": None, "contests_to_max": None, "total_contests": None, "error": parsed["error"]}
             parsed["cheating_status"] = "NA"
             parsed["caught_penalties"] = []
+            parsed["teaching_experience"] = {"has_experience": False, "duration_text": None}
+            parsed["priority"] = "P2"
+            parsed["level"] = current_level
+            parsed["fitment_score"] = 0
             results.append(parsed)
             continue
 
@@ -552,6 +841,10 @@ if analyze_btn:
 
         # Step 3 – Merge API + text fallbacks + cheating status
         merged = _merge_stats(parsed, profiles)
+        pf = _compute_priority_and_fitment(merged, current_level)
+        merged["priority"] = pf["priority"]
+        merged["level"] = pf["level"]
+        merged["fitment_score"] = pf["fitment_score"]
         results.append(merged)
 
     progress.progress(1.0, text=f"✅ Analysis complete! Processed all {len(urls)} resumes.")
@@ -566,6 +859,17 @@ if analyze_btn:
 
 if "results" in st.session_state and st.session_state["results"]:
     results = st.session_state["results"]
+    current_level = st.session_state.get("selected_level", "Auto (Detect Level)")
+    # Recalculate priority and fitment dynamically if user switches level in selectbox
+    for r in results:
+        if not r.get("error"):
+            pf = _compute_priority_and_fitment(r, current_level)
+            r["priority"] = pf["priority"]
+            r["level"] = pf["level"]
+            r["fitment_score"] = pf["fitment_score"]
+        else:
+            r["level"] = current_level
+
     df = _build_results_df(results)
 
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)

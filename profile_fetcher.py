@@ -42,6 +42,7 @@ def fetch_codeforces(handle: str) -> dict:
     result = {
         "max_rating": None,
         "contests_to_max": None,
+        "total_contests": None,
         "penalised": False,
         "penalty_details": None,
         "error": None,
@@ -70,6 +71,7 @@ def fetch_codeforces(handle: str) -> dict:
 
                 result["max_rating"] = max_rating
                 result["contests_to_max"] = contest_index_of_max + 1
+                result["total_contests"] = len(history)
             else:
                 u_url = f"https://codeforces.com/api/user.info?handles={handle}"
                 u_resp = _SESSION.get(u_url, timeout=15).json()
@@ -116,6 +118,7 @@ def fetch_codechef(handle: str) -> dict:
     result = {
         "max_rating": None,
         "contests_to_max": None,
+        "total_contests": None,
         "penalised": False,
         "penalty_details": None,
         "error": None,
@@ -133,6 +136,7 @@ def fetch_codechef(handle: str) -> dict:
             data = resp.json()
             rating_data = data.get("ratingData", [])
             if rating_data:
+                result["total_contests"] = len(rating_data)
                 max_rating = -1
                 idx_of_max = 0
                 for idx, c in enumerate(rating_data):
@@ -184,6 +188,7 @@ def fetch_codechef(handle: str) -> dict:
         m_cnt = re.search(r"Contests?\s+Participated:\s*(\d+)", html, re.I)
         if m_cnt:
             result["contests_to_max"] = int(m_cnt.group(1))
+            result["total_contests"] = int(m_cnt.group(1))
 
         # Check for embedded rating history json in scripts
         for s in re.finditer(r"allMatch\s*=\s*JSON\.parse\(\s*'([^']+)'\s*\)", html):
@@ -191,6 +196,7 @@ def fetch_codechef(handle: str) -> dict:
                 raw = s.group(1).encode().decode("unicode-escape")
                 arr = json.loads(raw)
                 if arr:
+                    result["total_contests"] = len(arr)
                     max_r = -1
                     idx_max = 0
                     for idx, item in enumerate(arr):
@@ -251,6 +257,7 @@ def fetch_leetcode(handle: str) -> dict:
     result = {
         "max_rating": None,
         "contests_to_max": None,
+        "total_contests": None,
         "penalised": False,
         "penalty_details": None,
         "error": None,
@@ -292,6 +299,7 @@ def fetch_leetcode(handle: str) -> dict:
         attended = [e for e in history if e.get("attended")] if history else []
 
         if attended:
+            result["total_contests"] = len(attended)
             max_rating = -1.0
             idx_max = 0
             for idx, entry in enumerate(attended):
@@ -308,6 +316,7 @@ def fetch_leetcode(handle: str) -> dict:
         if ranking and ranking.get("rating"):
             result["max_rating"] = round(ranking["rating"])
             result["contests_to_max"] = ranking.get("attendedContestsCount")
+            result["total_contests"] = ranking.get("attendedContestsCount")
         else:
             result["error"] = "No contest history"
 
@@ -330,6 +339,7 @@ def _fetch_best_profile(fetch_func, handles: list[str] | str | None) -> dict:
         return {
             "max_rating": None,
             "contests_to_max": None,
+            "total_contests": None,
             "penalised": False,
             "penalty_details": None,
             "error": "No handle found",
@@ -341,6 +351,7 @@ def _fetch_best_profile(fetch_func, handles: list[str] | str | None) -> dict:
     best = {
         "max_rating": None,
         "contests_to_max": None,
+        "total_contests": None,
         "penalised": False,
         "penalty_details": None,
         "error": None,
@@ -359,6 +370,7 @@ def _fetch_best_profile(fetch_func, handles: list[str] | str | None) -> dict:
             if best["max_rating"] is None or stats["max_rating"] > best["max_rating"]:
                 best["max_rating"] = stats["max_rating"]
                 best["contests_to_max"] = stats["contests_to_max"]
+                best["total_contests"] = stats.get("total_contests")
         elif best["max_rating"] is None and stats.get("error"):
             best["error"] = stats["error"]
         time.sleep(0.3)

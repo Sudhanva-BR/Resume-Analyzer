@@ -6,12 +6,36 @@ A Streamlit web app that analyzes competitive programming profiles from resume P
 
 ## Features
 
-- **Bulk Resume Analysis** – Paste multiple PDF URLs (Google Drive or direct links)
-- **Auto-Extraction** – Candidate names + Codeforces / CodeChef / LeetCode handles
-- **Live Stats** – Max rating and contest count from public APIs
-- **Clean Dashboard** – Summary cards, per-candidate badges, full data table
-- **Export** – Download results as CSV or Excel
-- **Resilient** – Handles invalid URLs, missing profiles, and API failures gracefully
+- **Bulk Resume Analysis** – Paste multiple PDF URLs (Google Drive, CodeChef recruiter downloads, direct HTTP)
+- **Auto-Extraction** – Candidate names, CP handles, inline ratings, ICPC achievements, portfolio links, and teaching experience
+- **Live Stats & Total Contests** – Max rating, contests to peak rating, and total contests attempted across Codeforces, CodeChef, and LeetCode
+- **Cheating & Integrity Detection** – Official contest plagiarism flags, MOSS penalties, and disqualification detection
+- **Role-Based Shortlisting (L1, L2, L3)**:
+  - **Auto-Detection**: Dynamically assigns L1, L2, or L3 per candidate (or can be fixed to a specific level).
+  - **L1**: CF ≥ 1400 / CC ≥ 1600 / LC ≥ 1850 (No experience required, only rating)
+    - **Fitment Score (out of 5)**: Base score is **3**
+      - **+1** if candidate has ICPC achievement
+      - **+1** if candidate has very high rating (CF ≥ 1600, CC ≥ 1800, or LC ≥ 2000)
+    - **P3**: Caught in > 1 contest OR reached max rating in < 5 contests across all active platforms
+    - **P1**: Given > 20 contests
+    - **P2**: Else
+  - **L2**: CF ≥ 1600 / CC ≥ 2000 / LC ≥ 2200 + ≥ 6 months experience
+    - **P3**: Caught in > 1 contest OR reached max rating in < 10 contests across all active platforms
+    - **P1**: Given > 30 contests AND has experience
+    - **P2**: Else
+  - **L3**: CF ≥ 1800 / CC ≥ 2200 / LC ≥ 2400 (or 1850+) + ≥ 6 months experience
+    - **P3**: Caught in > 1 contest OR reached max rating in < 5 contests across all active platforms
+    - **P1**: Given > 40 contests AND has experience
+    - **P2**: Else
+- **Candidate Fitment Score (0 - 5)**:
+  - Starts at 5 marks
+  - -1 mark if failed Criteria 1 (ratings)
+  - -1 mark if failed Criteria 2 (teaching experience)
+- **Formatted Excel Export**:
+  - Columns: Name | Resume link | context | Resume Shortlisting Priority (P1 > P2 > P3) | Priority for (L1, L2, L3) | Candidate Fitment Score (out of 5)
+  - Context format: `{Platform} : {rating} in {c} contest and attempted {t} contest in total` + direct profile link below
+  - Extra sub-row for teaching experience (`Have teaching experience of {duration}` or `Have experience in teaching`)
+  - Merged vertical columns aligned to match specification
 
 ---
 
