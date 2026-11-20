@@ -44,6 +44,7 @@ def fetch_codeforces(handle: str) -> dict:
         "contests_to_max": None,
         "total_contests": None,
         "penalised": False,
+        "penalty_count": 0,
         "penalty_details": None,
         "error": None,
     }
@@ -87,6 +88,7 @@ def fetch_codeforces(handle: str) -> dict:
             status_url = f"https://codeforces.com/api/user.status?handle={handle}&from=1&count=150"
             s_resp = _SESSION.get(status_url, timeout=10).json()
             if s_resp.get("status") == "OK":
+                skipped_items = []
                 for sub in s_resp.get("result", []):
                     # Official contest participant solution disqualified
                     if (
@@ -95,9 +97,19 @@ def fetch_codeforces(handle: str) -> dict:
                     ):
                         cid = sub.get("contestId", "")
                         pname = sub.get("problem", {}).get("name", "")
-                        result["penalised"] = True
-                        result["penalty_details"] = f"Codeforces Contest {cid} ({pname})"
-                        break
+                        pindex = sub.get("problem", {}).get("index", "")
+                        skipped_items.append((cid, pindex, pname))
+                if skipped_items:
+                    unique_skipped = list({(c, p): n for c, p, n in skipped_items}.items())
+                    q_cnt = len(unique_skipped)
+                    result["penalised"] = True
+                    result["penalty_count"] = q_cnt
+                    first_p = unique_skipped[0]
+                    result["penalty_details"] = (
+                        f"Codeforces Contest {first_p[0][0]} ({first_p[1]})"
+                        if q_cnt == 1
+                        else f"Codeforces ({q_cnt} questions skipped)"
+                    )
         except Exception:
             pass
 
@@ -120,6 +132,7 @@ def fetch_codechef(handle: str) -> dict:
         "contests_to_max": None,
         "total_contests": None,
         "penalised": False,
+        "penalty_count": 0,
         "penalty_details": None,
         "error": None,
     }
@@ -139,10 +152,12 @@ def fetch_codechef(handle: str) -> dict:
                 result["total_contests"] = len(rating_data)
                 max_rating = -1
                 idx_of_max = 0
+                penalised_contests = 0
                 for idx, c in enumerate(rating_data):
                     # Check for official plagiarism penalty
                     if c.get("penalised") or c.get("reason") == "penalised":
                         result["penalised"] = True
+                        penalised_contests += 1
                         result["penalty_details"] = f"CodeChef Contest {c.get('code', 'START')}"
 
                     try:
@@ -152,6 +167,11 @@ def fetch_codechef(handle: str) -> dict:
                             idx_of_max = idx
                     except (ValueError, TypeError):
                         continue
+
+                if penalised_contests > 0:
+                    result["penalty_count"] = penalised_contests
+                    if penalised_contests > 1:
+                        result["penalty_details"] = f"CodeChef ({penalised_contests} contests penalised)"
 
                 if max_rating > 0:
                     result["max_rating"] = max_rating
@@ -199,15 +219,23 @@ def fetch_codechef(handle: str) -> dict:
                     result["total_contests"] = len(arr)
                     max_r = -1
                     idx_max = 0
+                    penalised_contests = 0
                     for idx, item in enumerate(arr):
                         if item.get("penalised") or item.get("reason") == "penalised":
                             result["penalised"] = True
+                            penalised_contests += 1
                             result["penalty_details"] = f"CodeChef {item.get('name', 'Contest')}"
 
                         r = int(item.get("rating") or item.get("score") or 0)
                         if r > max_r:
                             max_r = r
                             idx_max = idx
+
+                    if penalised_contests > 0:
+                        result["penalty_count"] = penalised_contests
+                        if penalised_contests > 1:
+                            result["penalty_details"] = f"CodeChef ({penalised_contests} contests penalised)"
+
                     if max_r > 0:
                         result["max_rating"] = max_r
                         result["contests_to_max"] = idx_max + 1
@@ -259,6 +287,7 @@ def fetch_leetcode(handle: str) -> dict:
         "contests_to_max": None,
         "total_contests": None,
         "penalised": False,
+        "penalty_count": 0,
         "penalty_details": None,
         "error": None,
     }
@@ -341,6 +370,7 @@ def _fetch_best_profile(fetch_func, handles: list[str] | str | None) -> dict:
             "contests_to_max": None,
             "total_contests": None,
             "penalised": False,
+            "penalty_count": 0,
             "penalty_details": None,
             "error": "No handle found",
         }
@@ -353,6 +383,7 @@ def _fetch_best_profile(fetch_func, handles: list[str] | str | None) -> dict:
         "contests_to_max": None,
         "total_contests": None,
         "penalised": False,
+        "penalty_count": 0,
         "penalty_details": None,
         "error": None,
     }
@@ -365,6 +396,7 @@ def _fetch_best_profile(fetch_func, handles: list[str] | str | None) -> dict:
         if stats.get("penalised"):
             best["penalised"] = True
             best["penalty_details"] = stats.get("penalty_details")
+            best["penalty_count"] = max(best.get("penalty_count", 0), stats.get("penalty_count", 0))
 
         if stats.get("max_rating") is not None:
             if best["max_rating"] is None or stats["max_rating"] > best["max_rating"]:
@@ -400,6 +432,10 @@ def fetch_all_profiles(
     if lc_res.get("penalised"):
         caught_list.append(lc_res.get("penalty_details") or "LeetCode")
 
+    total_caught = (cf_res.get("penalty_count") or 0) + (cc_res.get("penalty_count") or 0) + (lc_res.get("penalty_count") or 0)
+    if total_caught == 0 and caught_list:
+        total_caught = len(caught_list)
+
     if not has_any:
         cheating_status = "NA"
     elif caught_list:
@@ -413,4 +449,5 @@ def fetch_all_profiles(
         "leetcode": lc_res,
         "cheating_status": cheating_status,
         "caught_penalties": caught_list,
+        "caught_count": total_caught,
     }

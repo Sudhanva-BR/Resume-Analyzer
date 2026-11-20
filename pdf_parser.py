@@ -44,6 +44,21 @@ def _download_pdf_bytes(url: str) -> bytes | None:
 
     # --- Method 1: Google Drive link handling ---
     if _is_google_drive_link(url):
+        # Check if it's a Google Doc (docs.google.com/document/d/...)
+        doc_m = re.search(r"docs\.google\.com/document/d/([a-zA-Z0-9_-]+)", url)
+        if doc_m:
+            doc_id = doc_m.group(1)
+            export_url = f"https://docs.google.com/document/d/{doc_id}/export?format=pdf"
+            try:
+                session = requests.Session()
+                session.headers.update({"User-Agent": _BROWSER_UA})
+                resp = session.get(export_url, timeout=25, allow_redirects=True)
+                if resp.status_code == 200 and len(resp.content) > 500:
+                    if resp.content[:5] == b"%PDF-" or b"%PDF-" in resp.content[:1024]:
+                        return resp.content
+            except Exception:
+                pass
+
         m = re.search(r"/d/([a-zA-Z0-9_-]+)", url) or re.search(r"id=([a-zA-Z0-9_-]+)", url)
         if m:
             fid = m.group(1)
@@ -172,8 +187,13 @@ _LC_PATTERNS = [
 ]
 
 _IGNORED_HANDLES = {
-    "u", "user", "users", "profile", "contests", "contest", "problem",
-    "problems", "ranking", "rankings", "leaderboard", "discuss", "explore"
+    "u", "user", "users", "profile", "profiles", "contests", "contest", "problem",
+    "problems", "ranking", "rankings", "leaderboard", "discuss", "explore",
+    "solved", "solving", "solution", "solutions", "questions", "question",
+    "rating", "max", "highest", "peak", "rank", "knight", "guardian",
+    "specialist", "expert", "candidate", "master", "grandmaster", "pupil", "newbie",
+    "star", "stars", "top", "global", "all", "india", "link", "handle", "id",
+    "portfolio", "resume", "github", "linkedin", "codeforces", "codechef", "leetcode",
 }
 
 
@@ -187,10 +207,15 @@ def _find_all_usernames(combined_text: str, patterns: list[re.Pattern]) -> list[
     for pat in patterns:
         for m in pat.finditer(combined_text):
             h = m.group(1).strip().rstrip("/.,;:()")
-            if h and len(h) >= 2 and h.lower() not in _IGNORED_HANDLES:
-                if h.lower() not in seen:
-                    seen.add(h.lower())
-                    found.append(h)
+            if not h or len(h) < 2:
+                continue
+            if h.isdigit():
+                continue
+            if h.lower() in _IGNORED_HANDLES:
+                continue
+            if h.lower() not in seen:
+                seen.add(h.lower())
+                found.append(h)
     return found
 
 
@@ -428,26 +453,36 @@ def _extract_portfolio_links(text: str, detailed_links: list[dict]) -> list[str]
 
 # ───────────────── Teaching experience extraction ──────────────────
 
-_TEACHING_KEYWORDS = re.compile(
-    r"\b(?:teaching\s+assistant|teaching\s+experience|teaching\s+fellow|"
-    r"tutor(?:ing)?|instructor|mentor(?:ing)?|faculty|taught|trainer|"
-    r"coaching|academic\s+mentor)\b",
-    re.I,
-)
+_TEACHING_ROLE_PATTERNS = [
+    re.compile(r"\b(?:teaching\s+assistant|graduate\s+teaching\s+assistant|undergraduate\s+teaching\s+assistant|\bTA\b)\b", re.I),
+    re.compile(r"\b(?:tutor(?:ing)?|private\s+tutor|coding\s+tutor|math(?:s)?\s+tutor)\b", re.I),
+    re.compile(r"\b(?:instructor|coding\s+instructor|course\s+instructor|lab\s+instructor)\b", re.I),
+    re.compile(r"\b(?:educator|faculty|assistant\s+professor|visiting\s+faculty|lecturer)\b", re.I),
+    re.compile(r"\b(?:teaching\s+fellow|academic\s+mentor|teaching\s+experience)\b", re.I),
+    re.compile(r"\b(?:technical\s+trainer|coding\s+trainer|dsa\s+trainer|programming\s+trainer)\b", re.I),
+    re.compile(r"\b(?:taught\s+(?:\d+|hundreds|dozens\s+of)?\s*(?:students|juniors|freshers|batches|classes|courses))\b", re.I),
+]
+
+_TEACHING_EXCLUDE_PATTERNS = [
+    re.compile(r"training\s+(?:and|&)\s+placement", re.I),
+    re.compile(r"placement\s+(?:cell|team|committee|department|coordinator|head)", re.I),
+    re.compile(r"(?:model|cnn|rnn|lstm|bert|gpt|network|weights|loss|dataset|data|pipeline)\s+training\b", re.I),
+    re.compile(r"\btraining\s+(?:data|dataset|loss|accuracy|set|sample|samples)\b", re.I),
+    re.compile(r"\btrained\s+(?:a\s+)?(?:model|classifier|network|system|agent|pipeline|algorithm)\b", re.I),
+    re.compile(r"self[- ]taught", re.I),
+    re.compile(r"(?:for|portal\s+for|system\s+for|dashboard\s+for|app\s+for)\s+(?:teachers|students|faculty)", re.I),
+    re.compile(r"teacher\s+(?:and|&|\/)\s+student", re.I),
+    re.compile(r"student\s+(?:and|&|\/)\s+teacher", re.I),
+    re.compile(r"teacher(?:'s)?\s+(?:portal|dashboard|management|app|system|interface|login)", re.I),
+    re.compile(r"(?:mentored|guided)\s+by\b", re.I),
+    re.compile(r"under\s+(?:the\s+)?mentorship\b", re.I),
+    re.compile(r"mentoring\s+(?:peers|teammates|team\s+members)\b", re.I),
+    re.compile(r"attended\s+(?:coaching|training|classes)\b", re.I),
+]
 
 _DURATION_INLINE = re.compile(
     r"(\d+)\+?\s*(?:years?|yrs?)\b(?:\s*(?:and|&)\s*(\d+)\s*(?:months?|mos?))?"
     r"|(\d+)\+?\s*(?:months?|mos?)\b",
-    re.I,
-)
-
-_DATE_RANGE = re.compile(
-    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
-    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
-    r"\s+(\d{4})\s*[-–—]\s*"
-    r"(?:(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
-    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
-    r"\s+(\d{4})|[Pp]resent|[Cc]urrent)",
     re.I,
 )
 
@@ -471,17 +506,31 @@ _DATE_RANGE_FULL = re.compile(
 
 def _extract_teaching_experience(text: str) -> dict:
     """
-    Scan resume text for teaching / tutoring / mentoring experience.
-    Returns:
-        {"has_experience": True/False, "duration_text": "1 year" or None}
+    Scan resume text for authentic teaching / tutoring / instructor experience.
+    Filters out placement cell, ML training, student portals, and peer mentoring.
     """
-    if not _TEACHING_KEYWORDS.search(text):
+    if not text:
         return {"has_experience": False, "duration_text": None}
 
-    # Try to find explicit inline durations near teaching keywords
-    for line in text.splitlines():
-        if not _TEACHING_KEYWORDS.search(line):
+    lines = text.splitlines()
+    matching_lines_with_idx = []
+
+    for idx, line in enumerate(lines):
+        clean_line = line.strip()
+        if not clean_line:
             continue
+        # Check exclusion patterns first on this line
+        if any(ex.search(clean_line) for ex in _TEACHING_EXCLUDE_PATTERNS):
+            continue
+        # Check if line matches any genuine teaching role
+        if any(role.search(clean_line) for role in _TEACHING_ROLE_PATTERNS):
+            matching_lines_with_idx.append((idx, clean_line))
+
+    if not matching_lines_with_idx:
+        return {"has_experience": False, "duration_text": None}
+
+    # If genuine teaching role matched, look for duration
+    for idx, line in matching_lines_with_idx:
         m = _DURATION_INLINE.search(line)
         if m:
             if m.group(1):  # N year(s) [and M month(s)]
@@ -497,13 +546,9 @@ def _extract_teaching_experience(text: str) -> dict:
                 months = int(m.group(3))
                 return {"has_experience": True, "duration_text": f"{months} month{'s' if months != 1 else ''}"}
 
-    # Try to find date ranges near teaching keywords
-    lines = text.splitlines()
-    for i, line in enumerate(lines):
-        if not _TEACHING_KEYWORDS.search(line):
-            continue
-        # Search this line and the next 3 lines for a date range
-        context = " ".join(lines[max(0, i - 1) : i + 4])
+    # Try date ranges near matching teaching lines (from idx-1 to idx+4)
+    for idx, line in matching_lines_with_idx:
+        context = " ".join(lines[max(0, idx - 1) : min(len(lines), idx + 5)])
         dm = _DATE_RANGE_FULL.search(context)
         if dm:
             start_month_str = dm.group(1).lower()[:3]
@@ -537,7 +582,6 @@ def _extract_teaching_experience(text: str) -> dict:
 
             return {"has_experience": True, "duration_text": duration}
 
-    # Has teaching keywords but couldn't parse duration
     return {"has_experience": True, "duration_text": None}
 
 

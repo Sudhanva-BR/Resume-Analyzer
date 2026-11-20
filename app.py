@@ -235,6 +235,7 @@ def _merge_stats(parsed: dict, profiles: dict) -> dict:
 
     result["cheating_status"] = profiles.get("cheating_status", "NA")
     result["caught_penalties"] = profiles.get("caught_penalties", [])
+    result["caught_count"] = profiles.get("caught_count", 0)
 
     return result
 
@@ -269,14 +270,23 @@ def _parse_teaching_duration_to_months(duration_text: str | None) -> int | None:
 
 def _detect_candidate_level(result: dict) -> str:
     """
-    Determine whether candidate is L3, L2, or L1 based on their ratings and experience:
+    Determine whether candidate is L3, L2, L1, or not qualified based on their ratings and experience:
     - L3: CF 1800+ or CC 2200+ or LC 2400+ and >= 6 months experience
     - L2: CF 1600+ or CC 2000+ or LC 2200+ and >= 6 months experience
     - L1: CF 1400+ or CC 1600+ or LC 1850+ and without exp or < 6 months experience
+    - not qualified: CF < 1400 and CC < 1600 and LC < 1850
     """
-    cf_rating = (result.get("cf_stats") or {}).get("max_rating")
-    cc_rating = (result.get("cc_stats") or {}).get("max_rating")
-    lc_rating = (result.get("lc_stats") or {}).get("max_rating")
+    def _safe_int(v):
+        if v is None:
+            return None
+        try:
+            return int(v)
+        except (ValueError, TypeError):
+            return None
+
+    cf_rating = _safe_int((result.get("cf_stats") or {}).get("max_rating"))
+    cc_rating = _safe_int((result.get("cc_stats") or {}).get("max_rating"))
+    lc_rating = _safe_int((result.get("lc_stats") or {}).get("max_rating"))
 
     teaching = result.get("teaching_experience") or {}
     has_teaching = teaching.get("has_experience", False)
@@ -308,15 +318,53 @@ def _detect_candidate_level(result: dict) -> str:
     if l2_rating and has_at_least_6m:
         return "L2"
 
-    # 3. Default to L1
-    return "L1"
+    # 3. Check L1: CF 1400+ or CC 1600+ or LC 1850+
+    l1_rating = (
+        (cf_rating is not None and cf_rating >= 1400) or
+        (cc_rating is not None and cc_rating >= 1600) or
+        (lc_rating is not None and lc_rating >= 1850)
+    )
+    if l1_rating:
+        return "L1"
+
+    # 4. Ratings below minimum thresholds
+    return "not qualified"
 
 
 def _compute_priority_and_fitment(result: dict, level: str) -> dict:
     """
     Compute Resume Shortlisting Priority (P1/P2/P3) and Candidate Fitment Score (0-5)
-    based on the selected role level (or Auto-detected L1/L2/L3).
+    based on the selected role level (or Auto-detected L1/L2/L3/not qualified).
     """
+    def _safe_int(v):
+        if v is None:
+            return None
+        try:
+            return int(v)
+        except (ValueError, TypeError):
+            return None
+
+    cf_rating = _safe_int((result.get("cf_stats") or {}).get("max_rating"))
+    cc_rating = _safe_int((result.get("cc_stats") or {}).get("max_rating"))
+    lc_rating = _safe_int((result.get("lc_stats") or {}).get("max_rating"))
+
+    # Check if candidate has qualified the baseline rating threshold:
+    # CF >= 1400 or CC >= 1600 or LC >= 1850
+    has_qualified_rating = (
+        (cf_rating is not None and cf_rating >= 1400) or
+        (cc_rating is not None and cc_rating >= 1600) or
+        (lc_rating is not None and lc_rating >= 1850)
+    )
+
+    # Condition: if codeforces rating < 1400 & codechef rating < 1600 & leetcode < 1850:
+    # priority: P3, level: not qualified, fitmentscore: 2
+    if not has_qualified_rating:
+        return {
+            "priority": "P3",
+            "level": "not qualified",
+            "fitment_score": 2,
+        }
+
     effective_level = _detect_candidate_level(result) if level == "Auto (Detect Level)" else level
 
     THRESHOLDS = {
@@ -336,10 +384,6 @@ def _compute_priority_and_fitment(result: dict, level: str) -> dict:
     t = THRESHOLDS.get(effective_level, THRESHOLDS["L1"])
 
     # 1. Criteria 1: Rating threshold
-    cf_rating = (result.get("cf_stats") or {}).get("max_rating")
-    cc_rating = (result.get("cc_stats") or {}).get("max_rating")
-    lc_rating = (result.get("lc_stats") or {}).get("max_rating")
-
     cf_met = cf_rating is not None and cf_rating >= t["cf"]
     cc_met = cc_rating is not None and cc_rating >= t["cc"]
     lc_met = lc_rating is not None and (
@@ -394,16 +438,31 @@ def _compute_priority_and_fitment(result: dict, level: str) -> dict:
             fitment -= 1
 
     # 4. Priority calculation
-    caught_count = len(result.get("caught_penalties", []))
+    caught = result.get("caught_count")
+    if caught is None:
+        cp = result.get("caught_penalties", [])
+        if isinstance(cp, int):
+            caught = cp
+        elif isinstance(cp, list):
+            caught = len(cp)
+        else:
+            caught = 0
+    caught_count = int(caught)
+
+    if caught_count == 0:
+        for pfx in ["cf", "cc", "lc"]:
+            st = result.get(f"{pfx}_stats") or {}
+            if st.get("penalised"):
+                caught_count += 1
 
     # Contest counts across all platforms where candidate participated
     active_contests_to_max = []
     given_contest_counts = []
     for prefix in ["cf", "cc", "lc"]:
         st = result.get(f"{prefix}_stats") or {}
-        r = st.get("max_rating")
-        c = st.get("contests_to_max")
-        tot = st.get("total_contests")
+        r = _safe_int(st.get("max_rating"))
+        c = _safe_int(st.get("contests_to_max"))
+        tot = _safe_int(st.get("total_contests"))
         if r is not None and c is not None:
             active_contests_to_max.append(c)
         if tot is not None:
@@ -470,6 +529,18 @@ def _build_results_df(results: list[dict]) -> pd.DataFrame:
                 return "NA"
             return f"{m} in {c} contests (total: {t})"
 
+        caught_count = r.get("caught_count", 0)
+        if caught_count == 0:
+            cp = r.get("caught_penalties", [])
+            if isinstance(cp, int):
+                caught_count = cp
+            elif isinstance(cp, list):
+                caught_count = len(cp)
+        if caught_count > 0:
+            cheat_disp = f"🚨 Caught ({caught_count} question{'s' if caught_count > 1 else ''})"
+        else:
+            cheat_disp = r.get("cheating_status") or "NA"
+
         rows.append(
             {
                 "#": idx,
@@ -485,7 +556,7 @@ def _build_results_df(results: list[dict]) -> pd.DataFrame:
                 "Codeforces": _stats_disp(r.get("cf_stats", {})),
                 "CodeChef": _stats_disp(r.get("cc_stats", {})),
                 "LeetCode": _stats_disp(r.get("lc_stats", {})),
-                "Contest Penalty / Caught": r.get("cheating_status") or "NA",
+                "Contest Penalty / Caught": cheat_disp,
             }
         )
     return pd.DataFrame(rows)
@@ -635,6 +706,20 @@ def _to_excel(results: list[dict]) -> bytes:
 
         # 6. LeetCode
         sub_items.append(_make_platform_item("leetcode", "LeetCode"))
+
+        # 7. Caught in questions (if candidate was caught in contests)
+        caught_cnt = r.get("caught_count", 0)
+        if caught_cnt == 0:
+            cp = r.get("caught_penalties", [])
+            if isinstance(cp, int):
+                caught_cnt = cp
+            elif isinstance(cp, list):
+                caught_cnt = len(cp)
+        if caught_cnt > 0:
+            sub_items.append({
+                "text": f"Caught in {caught_cnt} question{'s' if caught_cnt > 1 else ''}",
+                "url": None,
+            })
 
         n_sub = len(sub_items)
         start_row = current_row
@@ -833,11 +918,12 @@ if analyze_btn:
             parsed["lc_stats"] = {"max_rating": None, "contests_to_max": None, "total_contests": None, "error": parsed["error"]}
             parsed["cheating_status"] = "NA"
             parsed["caught_penalties"] = []
+            parsed["caught_count"] = 0
             parsed["teaching_experience"] = {"has_experience": False, "duration_text": None}
             parsed["graduation_year"] = None
-            parsed["priority"] = "P2"
-            parsed["level"] = current_level
-            parsed["fitment_score"] = 0
+            parsed["priority"] = "P3"
+            parsed["level"] = "not qualified"
+            parsed["fitment_score"] = 2
             results.append(parsed)
             continue
 
@@ -878,7 +964,9 @@ if "results" in st.session_state and st.session_state["results"]:
             r["level"] = pf["level"]
             r["fitment_score"] = pf["fitment_score"]
         else:
-            r["level"] = current_level
+            r["priority"] = "P3"
+            r["level"] = "not qualified"
+            r["fitment_score"] = 2
 
     df = _build_results_df(results)
 
